@@ -1,0 +1,15 @@
+name = "gtm-auditor-server"
+main = "worker/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "GTM_CONTAINER"
+id = "xxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[[d1_databases]]
+binding = "gtm_chat_history"
+database_name = "gtm-chat-history"
+database_id = "xxxxxxxxxxxxxxxxxxxxxxx"
+[vars]
+IMG_BB_API_KEY = "xxxxxxxxxxxxxxxxxxxxxxxx"
