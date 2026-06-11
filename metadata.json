@@ -1,0 +1,5 @@
+{
+  "name": "GTM Auditor",
+  "description": "Analyze Google Tag Manager containers for health, privacy, and GA4 best practices.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,25 @@
+{
+  "name": "brighthorizon-monorepo",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev:gtm": "pnpm --filter @brighthorizon/gtm dev",
+    "dev:ga4": "pnpm --filter @brighthorizon/ga4 dev",
+    "dev:worker": "wrangler dev",
+    "build:gtm": "pnpm --filter @brighthorizon/gtm build",
+    "build:ga4": "pnpm --filter @brighthorizon/ga4 build",
+    "get-minified": "tsx get-minified.ts",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260502.1",
+    "@types/node": "^22.19.17",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.3",
+    "wrangler": "^4.87.0"
+  },
+  "dependencies": {
+    "@google/genai": "^1.51.0"
+  }
+}
