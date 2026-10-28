@@ -1,3 +1,7 @@
-packages:
-  - "frontend/apps/*"
-  - "frontend/packages/*"
+# Backend is a single package; no workspace members.
+allowBuilds:
+  '@google/genai': true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+  workerd: true
