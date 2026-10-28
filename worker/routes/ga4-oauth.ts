@@ -11,6 +11,14 @@ import {
 } from '../services/ga4/oauth';
 import { ga4RestGet, GA4_ADMIN_API_BASE } from '../services/ga4/api';
 
+// Behind Cloud Run the Worker runtime sees http://; rebuild the public https origin.
+function publicOrigin(request: Request): string {
+  const u = new URL(request.url);
+  const local = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+  const proto = local ? u.protocol.replace(':', '') : 'https'; // Cloud Run is always https externally
+  return `${proto}://${u.host}`;
+}
+
 // ── Unauthenticated: OAuth callback (Google redirects here) ──────────────────
 
 export async function handleGa4OAuthCallback(
@@ -50,7 +58,7 @@ export async function handleGa4OAuthCallback(
       });
     }
 
-    const origin = new URL(request.url).origin;
+    const origin = publicOrigin(request);
     const redirectUri = `${origin}/api/ga4/oauth/callback`;
 
     // Exchange authorization code for tokens
@@ -127,7 +135,7 @@ export async function handleGa4(
     const oauthAction = parts[3];
 
     if (oauthAction === 'authorize' && method === 'GET') {
-      const origin = new URL(request.url).origin;
+      const origin = publicOrigin(request);
       const redirectUri = `${origin}/api/ga4/oauth/callback`;
       const state = btoa(JSON.stringify({ userId: currentUser.id, ts: Date.now() }));
       return new Response(null, {
