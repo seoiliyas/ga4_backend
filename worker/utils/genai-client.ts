@@ -42,7 +42,7 @@ export function parseServiceAccountJson(raw: string): Record<string, any> {
 
 export function createGeminiClient(env: Env): GoogleGenAI {
   const saJson = env.GEMINI_SERVICE_ACCOUNT_JSON || env.GCP_SERVICE_ACCOUNT_JSON;
-  const location = env.GCP_LOCATION || 'us-central1';
+  const location = env.GCP_LOCATION || 'global';
 
   // Cloudflare Workers / inline SA deployments: service account JSON passed via env/secret.
   if (saJson) {

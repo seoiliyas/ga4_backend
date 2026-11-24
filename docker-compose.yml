@@ -36,7 +36,7 @@ services:
       AUTO_SEED_CONTAINER: ${AUTO_SEED_CONTAINER:-true}
       AUTO_CREATE_BUCKETS: ${AUTO_CREATE_BUCKETS:-false}
       GCP_PROJECT_ID: ${GCP_PROJECT_ID:-gen-lang-client-0120793460}
-      GCP_LOCATION: ${GCP_LOCATION:-us-central1}
+      GCP_LOCATION: ${GCP_LOCATION:-global}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-local-dev-token-encryption-key-change-me-32b}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8787}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5174}

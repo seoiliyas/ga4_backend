@@ -152,7 +152,7 @@ ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/cloudrun-env.XXXXXX.yaml")"
 trap 'rm -f "$ENV_FILE"' EXIT
 {
   printf 'GCP_PROJECT_ID: "%s"\n' "$PROJECT_ID"
-  printf 'GCP_LOCATION: "%s"\n' "$REGION"
+  printf 'GCP_LOCATION: "global"\n'
   printf 'INSTANCE_CONNECTION_NAME: "%s"\n' "$INSTANCE_CONNECTION_NAME"
   printf 'DB_NAME: "%s"\n' "$DB_NAME"
   printf 'DB_USER: "%s"\n' "$DB_USER"

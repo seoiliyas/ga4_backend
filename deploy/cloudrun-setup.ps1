@@ -245,7 +245,7 @@ try {
   try {
     $envLines = @(
       "GCP_PROJECT_ID: $(Format-YamlDoubleQuoted $ProjectId)",
-      "GCP_LOCATION: $(Format-YamlDoubleQuoted $Region)",
+      'GCP_LOCATION: "global"',
       "INSTANCE_CONNECTION_NAME: $(Format-YamlDoubleQuoted $InstanceConnectionName)",
       "DB_NAME: $(Format-YamlDoubleQuoted $DbName)",
       "DB_USER: $(Format-YamlDoubleQuoted $DbUser)",

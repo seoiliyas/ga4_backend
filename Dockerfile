@@ -42,7 +42,7 @@ EXPOSE 8080
 # Safe Cloud Run defaults (override via env vars / Secret Manager as needed)
 ENV NODE_ENV=production \
     PORT=8080 \
-    GCP_LOCATION=us-central1 \
+    GCP_LOCATION=global \
     AUTO_INIT_DB=true \
     AUTO_SEED_CONTAINER=true \
     AUTO_CREATE_BUCKETS=false \

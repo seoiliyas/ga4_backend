@@ -134,7 +134,9 @@ export async function ensureGcsSetup(
   let containerSeeded = false;
   const autoCreateBuckets = process.env.AUTO_CREATE_BUCKETS === 'true';
   const autoSeedContainer = process.env.AUTO_SEED_CONTAINER !== 'false';
-  const location = process.env.GCP_LOCATION?.trim() || 'us-central1';
+  const rawLocation =
+    process.env.GCS_BUCKET_LOCATION?.trim() || process.env.GCP_LOCATION?.trim() || 'US';
+  const location = rawLocation.toLowerCase() === 'global' ? 'US' : rawLocation;
 
   const maybeCreateBucket = async (bucketName: string, label: string): Promise<void> => {
     if (!autoCreateBuckets) return;

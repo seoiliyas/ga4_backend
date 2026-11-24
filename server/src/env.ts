@@ -119,6 +119,6 @@ export function buildEnv(): any {
     GCP_SERVICE_ACCOUNT_JSON:
       process.env.GCP_SERVICE_ACCOUNT_JSON || process.env.GCP_SERVICE_ACCOUNT_JSON_B64,
     GCP_PROJECT_ID: projectId,
-    GCP_LOCATION: process.env.GCP_LOCATION ?? 'us-central1',
+    GCP_LOCATION: process.env.GCP_LOCATION ?? 'global',
   };
 }
