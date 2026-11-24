@@ -4,13 +4,17 @@
 export interface Env {
   GTM_CONTAINER: KVNamespace;
   gtm_chat_history: D1Database;
+  CHAT_FILES?: R2Bucket;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   TOKEN_ENCRYPTION_KEY: string;
-  GCP_PROJECT_ID: string;
-  GCP_LOCATION: string;
-  GCP_SERVICE_ACCOUNT_JSON: string;
-  IMG_BB_API_KEY: string;
+  IMG_BB_API_KEY?: string;
+  ALLOWED_ORIGINS?: string;
+  PUBLIC_BASE_URL?: string;
+  GEMINI_SERVICE_ACCOUNT_JSON?: string;
+  GCP_SERVICE_ACCOUNT_JSON?: string;
+  GCP_PROJECT_ID?: string;
+  GCP_LOCATION?: string;
 }
 
 export interface AuthUser {
@@ -33,7 +37,7 @@ export interface StoredOAuthRow {
 
 export const TOKEN_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// Updated to Vertex AI Gemini 2.5 model
-export const GEMINI_MODEL = 'publishers/google/models/gemini-3.1-pro-preview';
-export const CACHE_TTL_SECONDS = 1800; // 30 minutes
-export const KV_CACHE_KEY = 'gemini_cache_name';
+// Gemini AI constants (Google AI / Vertex AI)
+export const GEMINI_MODEL = 'gemini-2.5-flash';
+export const CACHE_TTL_SECONDS = 3600; // 1 hour
+export const KV_CACHE_KEY = 'gemini_gtm_context_cache';

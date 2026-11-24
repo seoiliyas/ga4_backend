@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-gtm_chat_history}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-gtm_chat_history}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8787:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-gtm_chat_history}
+      AUTO_INIT_DB: "true"
+      AUTO_SEED_CONTAINER: ${AUTO_SEED_CONTAINER:-true}
+      AUTO_CREATE_BUCKETS: ${AUTO_CREATE_BUCKETS:-false}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-gen-lang-client-0120793460}
+      GCP_LOCATION: ${GCP_LOCATION:-us-central1}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-local-dev-token-encryption-key-change-me-32b}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8787}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5174}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GCP_SERVICE_ACCOUNT_JSON: ${GCP_SERVICE_ACCOUNT_JSON:-}
+      GCP_SERVICE_ACCOUNT_JSON_B64: ${GCP_SERVICE_ACCOUNT_JSON_B64:-}
+      IMG_BB_API_KEY: ${IMG_BB_API_KEY:-}
+      # To mount a local GCP service account key file instead of inline JSON:
+      # GOOGLE_APPLICATION_CREDENTIALS: /secrets/gcp-sa.json
+    # volumes:
+    #   - ./your-service-account.json:/secrets/gcp-sa.json:ro
+
+volumes:
+  pgdata:

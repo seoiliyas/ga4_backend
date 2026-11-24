@@ -7,10 +7,14 @@
     "dev:gtm": "pnpm --filter @brighthorizon/gtm dev",
     "dev:ga4": "pnpm --filter @brighthorizon/ga4 dev",
     "dev:worker": "wrangler dev",
+    "dev:server": "pnpm --filter @gtm-auditor/server dev",
     "build:gtm": "pnpm --filter @brighthorizon/gtm build",
     "build:ga4": "pnpm --filter @brighthorizon/ga4 build",
+    "build:all": "pnpm run build:gtm && pnpm run build:ga4",
     "get-minified": "tsx get-minified.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && pnpm --filter @gtm-auditor/server run typecheck && pnpm --filter @brighthorizon/shared exec tsc --noEmit && pnpm --filter @brighthorizon/gtm exec tsc --noEmit && pnpm --filter @brighthorizon/ga4 exec tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260502.1",
@@ -20,6 +24,6 @@
     "wrangler": "^4.87.0"
   },
   "dependencies": {
-    "@google/genai": "^1.51.0"
+    "@google/genai": "^2.10.0"
   }
 }

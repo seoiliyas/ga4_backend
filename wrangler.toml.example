@@ -1,0 +1,33 @@
+name = "gtm-auditor-server"
+main = "worker/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "GTM_CONTAINER"
+id = "your-kv-namespace-id"
+
+[[d1_databases]]
+binding = "gtm_chat_history"
+database_name = "gtm-chat-history"
+database_id = "your-d1-database-id"
+
+[[r2_buckets]]
+binding = "CHAT_FILES"
+bucket_name = "your-r2-bucket-name"
+
+[triggers]
+crons = ["0 3 * * *"]
+
+# Required Cloudflare Worker secrets:
+#   wrangler secret put GOOGLE_CLIENT_ID
+#   wrangler secret put GOOGLE_CLIENT_SECRET
+#   wrangler secret put TOKEN_ENCRYPTION_KEY
+#   wrangler secret put GCP_SERVICE_ACCOUNT_JSON
+# Optional fallback chart upload secret:
+#   wrangler secret put IMG_BB_API_KEY
+#
+# Optional public vars:
+# [vars]
+# ALLOWED_ORIGINS = "https://your-gtm-app.pages.dev,https://your-ga4-app.pages.dev"
+# PUBLIC_BASE_URL = "https://your-worker.workers.dev"

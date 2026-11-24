@@ -1,4 +1,4 @@
--- GTM Auditor – Full Schema
+-- GTM Auditor – Full D1 (SQLite) Schema
 -- Run via: npx wrangler d1 execute gtm-chat-history --file=./schema.sql --remote
 
 -- ── Enforce foreign key constraints (SQLite has them OFF by default) ──────────
@@ -8,13 +8,13 @@ PRAGMA foreign_keys = ON;
 -- ── Authentication ────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    username TEXT NOT NULL,
-    email TEXT NOT NULL,
-    password TEXT NOT NULL,
-    app TEXT NOT NULL DEFAULT 'gtm' CHECK(app IN ('gtm', 'ga4')),
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL DEFAULT 0
+  id         TEXT    PRIMARY KEY,
+  username   TEXT    NOT NULL,
+  email      TEXT    NOT NULL,
+  password   TEXT    NOT NULL,
+  app        TEXT    NOT NULL DEFAULT 'gtm' CHECK(app IN ('gtm', 'ga4')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 -- Composite unique: same username/email allowed across different apps
@@ -22,43 +22,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_app ON users(username, app)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_app ON users(email, app);
 
 CREATE TABLE IF NOT EXISTS auth_tokens (
-    token TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  token      TEXT    PRIMARY KEY,
+  user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invite_keys (
-    invite_key TEXT PRIMARY KEY,
-    app TEXT, -- 'gtm' or 'ga4'
-    created_by TEXT NOT NULL,
-    used_by TEXT,
-    used_at INTEGER,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (created_by) REFERENCES users(id),
-    FOREIGN KEY (used_by) REFERENCES users(id)
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    mode TEXT, -- 'gtm' or 'ga4'
-    ga4_property_id TEXT,
-    user_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role TEXT NOT NULL, -- 'user' or 'model'
-    text TEXT NOT NULL,
-    charts TEXT, -- JSON array of chart URLs
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+  invite_key TEXT    PRIMARY KEY,
+  app        TEXT    CHECK(app IS NULL OR app IN ('gtm', 'ga4')),
+  created_by TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  used_by    TEXT             REFERENCES users(id) ON DELETE SET NULL,
+  used_at    INTEGER,
+  created_at INTEGER NOT NULL
 );
 
 -- ── Auth indexes ──────────────────────────────────────────────────────────────
@@ -82,14 +58,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id         TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
-) WITHOUT ROWID;
+);
 
 CREATE TABLE IF NOT EXISTS messages (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  role       TEXT    NOT NULL CHECK(role IN ('user', 'model')),
-  text       TEXT    NOT NULL,
-  created_at INTEGER NOT NULL
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  role        TEXT    NOT NULL CHECK(role IN ('user', 'model')),
+  text        TEXT    NOT NULL,
+  charts      TEXT,
+  attachments TEXT,
+  created_at  INTEGER NOT NULL
 );
 
 -- ── Chat indexes ──────────────────────────────────────────────────────────────
@@ -116,6 +94,29 @@ CREATE TABLE IF NOT EXISTS ga4_oauth_tokens (
   updated_at      INTEGER NOT NULL
 ) WITHOUT ROWID;
 
+-- ── Chat File Attachments ─────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS attachments (
+  id         TEXT    PRIMARY KEY,
+  session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  message_id INTEGER          REFERENCES messages(id) ON DELETE SET NULL,
+  user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  filename   TEXT    NOT NULL,
+  mime_type  TEXT    NOT NULL,
+  size       INTEGER NOT NULL,
+  r2_key     TEXT    NOT NULL,
+  created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_attachments_session ON attachments(session_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_user    ON attachments(user_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
+
+-- ── Migration note for older existing D1 databases ────────────────────────────
+-- If upgrading a pre-attachments DB that already has `messages` without `attachments`:
+--   ALTER TABLE messages ADD COLUMN attachments TEXT;
+--   ALTER TABLE messages ADD COLUMN charts TEXT;
+--
 -- ── Maintenance ───────────────────────────────────────────────────────────────
--- Purge expired auth tokens periodically (run manually or via a CRON trigger):
---   DELETE FROM auth_tokens WHERE expires_at < (strftime('%s','now') * 1000);
+-- Expired auth tokens are purged automatically by the Worker Cron trigger
+-- (`DELETE FROM auth_tokens WHERE expires_at < (strftime('%s','now') * 1000)`).

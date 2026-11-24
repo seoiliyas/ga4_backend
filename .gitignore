@@ -11,10 +11,20 @@ yarn-error.log*
 pnpm-debug.log*
 .eslintcache
 
-# Environment
+# Environment & Secrets
 wrangler.toml
 .env*
 !.env.example
+!server/.env.example
+!wrangler.toml.example
+*service-account*.json
+gen-lang-client-*.txt
+
+# Archives & Personal Artifacts
+*.zip
+*.docx
+*.pdf
+frontend/apps/*/test.css
 
 # Local Database Files
 *.sqlite

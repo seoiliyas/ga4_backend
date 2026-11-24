@@ -1,6 +1,9 @@
 // ── Chart tool ─────────────────────────────────────────────────────────────────
-// Renders Chart.js charts via QuickChart.io and optionally uploads them to ImgBB
-// for permanent retention. Works in Cloudflare Workers / Node / Deno.
+// Renders Chart.js v4 charts via QuickChart.io and stores PNGs privately in
+// CHAT_FILES (R2/GCS) with authenticated `/api/files/:id` URLs, falling back to
+// ImgBB (if configured) or QuickChart shortUrl when private storage isn't passed.
+
+import { Env } from '../../../types';
 
 const QUICKCHART = 'https://quickchart.io';
 const IMGBB_UPLOAD = 'https://api.imgbb.com/1/upload';
@@ -32,23 +35,22 @@ export interface CreateChartInput {
   height?: number;
   xAxisLabel?: string;
   yAxisLabel?: string;
-  /** Optional ImgBB configuration for permanent storage */
-  imgbb?: {
-    apiKey: string;                     // Your ImgBB API key (required)
-    expiration?: number;                // Auto-delete after seconds (60-15552000)
-    name?: string;                      // Custom file name (optional)
-  };
+}
+
+export interface ChartStorageContext {
+  env?: Env;
+  db?: D1Database;
+  userId?: string;
+  sessionId?: string;
 }
 
 export interface ChartResult {
-  /** QuickChart long-form URL — always works (3-day retention) */
+  /** QuickChart long-form URL (v4) */
   imageUrl: string;
-  /** QuickChart short URL — shorter, but also 3-day retention */
+  /** QuickChart short URL (v4, 3-day retention) */
   shortUrl: string;
-  /** ImgBB permanent image URL — present only if upload succeeded */
+  /** Permanent URL — private `/api/files/:id` (preferred) or ImgBB fallback */
   permanentUrl?: string;
-  /** ImgBB viewer page URL (optional) */
-  permanentViewerUrl?: string;
 }
 
 // ── Colour assignment ──────────────────────────────────────────────────────────
@@ -70,8 +72,8 @@ function withColours(datasets: ChartDataset[], type: CreateChartInput['type']): 
   });
 }
 
-// ── Chart.js config ────────────────────────────────────────────────────────────
-function buildConfig(input: CreateChartInput): object {
+// ── Chart.js v4 config ─────────────────────────────────────────────────────────
+export function buildChartConfig(input: CreateChartInput): object {
   const datasets = withColours(input.datasets, input.type);
   const isFlat = input.type === 'pie' || input.type === 'doughnut' || input.type === 'radar';
   const isHoriz = input.type === 'horizontalBar';
@@ -94,10 +96,11 @@ function buildConfig(input: CreateChartInput): object {
       ...(!isFlat && {
         scales: {
           x: {
+            beginAtZero: isHoriz,
             title: input.xAxisLabel ? { display: true, text: input.xAxisLabel } : undefined,
           },
           y: {
-            beginAtZero: true,
+            beginAtZero: !isHoriz,
             title: input.yAxisLabel ? { display: true, text: input.yAxisLabel } : undefined,
           },
         },
@@ -106,203 +109,167 @@ function buildConfig(input: CreateChartInput): object {
   };
 }
 
-// ── Fetch raw image bytes from a URL and return as base64 ─────────────────────
-async function fetchImageAsBase64(imageUrl: string): Promise<string | null> {
-  console.log('[ImgBB] STEP 2 — Fetching raw image bytes from QuickChart...');
-  console.log('[ImgBB]   URL:', imageUrl);
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+// ── Render PNG via QuickChart POST API (avoids GET URL length limits) ─────────
+async function renderChartPng(config: object, width: number, height: number): Promise<ArrayBuffer | null> {
   try {
-    const res = await fetch(imageUrl);
-    console.log('[ImgBB]   QuickChart response status:', res.status, res.statusText);
-    console.log('[ImgBB]   Content-Type:', res.headers.get('content-type'));
-
+    const res = await fetch(`${QUICKCHART}/chart`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chart: config,
+        width,
+        height,
+        backgroundColor: 'white',
+        version: '4',
+        format: 'png',
+      }),
+    });
     if (!res.ok) {
-      console.error('[ImgBB]   ✗ QuickChart fetch failed — non-OK status:', res.status);
+      console.error('[Chart] QuickChart render failed:', res.status);
       return null;
     }
-
     const buffer = await res.arrayBuffer();
-    console.log('[ImgBB]   Raw bytes received:', buffer.byteLength, 'bytes');
-
-    if (buffer.byteLength === 0) {
-      console.error('[ImgBB]   ✗ QuickChart returned empty body — cannot encode');
-      return null;
-    }
-
-    // Spreading a large Uint8Array as function args overflows the call stack.
-    // Process in 8 KB chunks to stay safe at any image size.
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    const CHUNK = 8192;
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-    }
-    const base64 = btoa(binary);
-    console.log('[ImgBB]   ✓ Base64 encoded successfully, length:', base64.length);
-    return base64;
+    return buffer.byteLength > 0 ? buffer : null;
   } catch (err) {
-    console.error('[ImgBB]   ✗ Exception while fetching image:', err);
+    console.error('[Chart] Exception rendering QuickChart PNG:', err);
     return null;
   }
 }
 
-// ── Upload image to ImgBB ──────────────────────────────────────────────────────
-async function uploadToImgbb(
-  base64Image: string,
-  options: NonNullable<CreateChartInput['imgbb']>
-): Promise<{ permanentUrl: string; viewerUrl: string } | null> {
-  console.log('[ImgBB] STEP 3 — Uploading base64 image to ImgBB...');
-  console.log('[ImgBB]   API key present:', !!options.apiKey);
-  console.log('[ImgBB]   API key (first 6 chars):', options.apiKey?.slice(0, 6) + '...');
-  console.log('[ImgBB]   base64 length being sent:', base64Image.length);
-  console.log('[ImgBB]   expiration:', options.expiration ?? 'none');
-  console.log('[ImgBB]   name:', options.name ?? 'none');
-
+async function storeChartInPrivateStorage(
+  pngBytes: ArrayBuffer,
+  title: string,
+  ctx: Required<ChartStorageContext>,
+): Promise<string | undefined> {
   try {
-    const form = new FormData();
-    form.append('key', options.apiKey);
-    form.append('image', base64Image);
-    if (options.name) form.append('name', options.name);
-    if (options.expiration) form.append('expiration', options.expiration.toString());
+    const bucket = ctx.env.CHAT_FILES;
+    if (!bucket) return undefined;
 
-    console.log('[ImgBB]   Sending POST to:', IMGBB_UPLOAD);
-    const res = await fetch(IMGBB_UPLOAD, {
-      method: 'POST',
-      body: form,
+    const id = `chart-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    const safeTitle = (title || 'chart').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100) || 'chart';
+    const filename = `${safeTitle}.png`;
+    const safeSession = ctx.sessionId.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const r2Key = `${ctx.userId}/${safeSession}/charts/${id}.png`;
+    const now = Date.now();
+
+    await bucket.put(r2Key, pngBytes, {
+      httpMetadata: { contentType: 'image/png' },
+      customMetadata: { originalName: filename, userId: ctx.userId },
     });
 
-    console.log('[ImgBB]   ImgBB response status:', res.status, res.statusText);
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error('[ImgBB]   ✗ ImgBB HTTP error:', res.status, '— body:', errorText);
-      return null;
-    }
-
-    const rawText = await res.text();
-    console.log('[ImgBB]   Raw ImgBB response body:', rawText);
-
-    let json: { success: boolean; data?: { url: string; url_viewer: string }; error?: any };
     try {
-      json = JSON.parse(rawText);
-    } catch (parseErr) {
-      console.error('[ImgBB]   ✗ Failed to parse ImgBB response as JSON:', parseErr);
-      return null;
+      await ctx.db
+        .prepare(
+          'INSERT INTO attachments (id, session_id, user_id, filename, mime_type, size, r2_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .bind(id, ctx.sessionId, ctx.userId, filename, 'image/png', pngBytes.byteLength, r2Key, now)
+        .run();
+    } catch (dbErr) {
+      await bucket.delete(r2Key).catch(() => {});
+      throw dbErr;
     }
 
-    console.log('[ImgBB]   json.success:', json.success);
-
-    if (!json.success) {
-      console.error('[ImgBB]   ✗ ImgBB returned success=false. Error details:', json.error ?? 'none provided');
-      return null;
-    }
-
-    if (!json.data?.url) {
-      console.error('[ImgBB]   ✗ ImgBB success=true but data.url is missing. Full response:', json);
-      return null;
-    }
-
-    console.log('[ImgBB]   ✓ Upload successful!');
-    console.log('[ImgBB]   permanentUrl:', json.data.url);
-    console.log('[ImgBB]   viewerUrl:', json.data.url_viewer);
-    return {
-      permanentUrl: json.data.url,
-      viewerUrl: json.data.url_viewer,
-    };
+    return `/api/files/${id}`;
   } catch (err) {
-    console.error('[ImgBB]   ✗ Exception during ImgBB upload:', err);
-    return null;
+    console.error('[Chart] Private chart storage failed:', err);
+    return undefined;
   }
 }
 
-// ── Main function ──────────────────────────────────────────────────────────────
-export async function createChart(input: CreateChartInput): Promise<ChartResult> {
-  console.log('[ImgBB] ═══════════════════════════════════════════');
-  console.log('[ImgBB] createChart() called — type:', input.type, '| title:', input.title);
+async function uploadToImgbb(pngBytes: ArrayBuffer, apiKey: string): Promise<string | undefined> {
+  try {
+    const form = new FormData();
+    form.append('key', apiKey);
+    form.append('image', arrayBufferToBase64(pngBytes));
 
-  const config = buildConfig(input);
-  const w = input.width ?? 800;
-  const h = input.height ?? 420;
-  const encoded = encodeURIComponent(JSON.stringify(config));
+    const res = await fetch(IMGBB_UPLOAD, { method: 'POST', body: form });
+    if (!res.ok) return undefined;
+    const json = (await res.json()) as { success: boolean; data?: { url: string } };
+    return json.success ? json.data?.url : undefined;
+  } catch (err) {
+    console.error('[Chart] ImgBB fallback upload failed:', err);
+    return undefined;
+  }
+}
 
-  const imageUrl = `${QUICKCHART}/chart?c=${encoded}&w=${w}&h=${h}&bkg=white&v=2`;
-  console.log('[ImgBB] Long-form QuickChart URL built (length):', imageUrl.length);
-
-  // QuickChart shortener
-  let shortUrl = imageUrl;
+async function createQuickChartShortUrl(config: object, width: number, height: number): Promise<string | null> {
   try {
     const res = await fetch(`${QUICKCHART}/chart/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chart: config, width: w, height: h,
-        backgroundColor: 'white', version: '2',
+        chart: config,
+        width,
+        height,
+        backgroundColor: 'white',
+        version: '4',
       }),
     });
-    if (res.ok) {
-      const json = await res.json() as { success: boolean; url?: string };
-      if (json.success && json.url) {
-        shortUrl = json.url;
-        console.log('[ImgBB] QuickChart short URL:', shortUrl);
-      }
-    }
+    if (!res.ok) return null;
+    const json = (await res.json()) as { success: boolean; url?: string };
+    return json.success && json.url ? json.url : null;
   } catch {
-    console.warn('[ImgBB] QuickChart shortener failed — falling back to long URL');
+    return null;
   }
+}
 
-  // ── ImgBB permanent upload ────────────────────────────────────────────────────
-  let permanentResult: { permanentUrl: string; viewerUrl: string } | undefined;
+// ── Main function ──────────────────────────────────────────────────────────────
+export async function createChart(
+  input: CreateChartInput,
+  ctx?: ChartStorageContext,
+): Promise<ChartResult> {
+  const config = buildChartConfig(input);
+  const w = input.width ?? 800;
+  const h = input.height ?? 420;
+  const encoded = encodeURIComponent(JSON.stringify(config));
+  const imageUrl = `${QUICKCHART}/chart?c=${encoded}&w=${w}&h=${h}&bkg=white&v=4`;
 
-  const apiKey =
-    input.imgbb?.apiKey ??
-    (typeof process !== 'undefined' ? process.env.IMG_BB_API_KEY : undefined) ??
-    (globalThis as any).IMG_BB_API_KEY as string | undefined;
+  let permanentUrl: string | undefined;
+  const pngBytes = await renderChartPng(config, w, h);
 
-  console.log('[ImgBB] ───────────────────────────────────────────');
-  console.log('[ImgBB] STEP 1 — Checking ImgBB config...');
-  console.log('[ImgBB]   input.imgbb present:', !!input.imgbb);
-  console.log('[ImgBB]   apiKey resolved:', !!apiKey);
+  if (pngBytes) {
+    if (ctx?.env?.CHAT_FILES && ctx.db && ctx.userId && ctx.sessionId) {
+      permanentUrl = await storeChartInPrivateStorage(pngBytes, input.title, {
+        env: ctx.env,
+        db: ctx.db,
+        userId: ctx.userId,
+        sessionId: ctx.sessionId,
+      });
+    }
 
-  if (!apiKey) {
-    console.warn('[ImgBB]   ✗ No API key found — skipping ImgBB upload.');
-    console.warn('[ImgBB]     Provide it via input.imgbb.apiKey or globalThis.IMG_BB_API_KEY');
-  } else {
-    const base64 = await fetchImageAsBase64(imageUrl);
-
-    if (!base64) {
-      console.error('[ImgBB]   ✗ Could not get base64 image — skipping ImgBB upload');
-    } else {
-      const imgbbOptions = Object.assign({ apiKey }, input.imgbb);
-      permanentResult = (await uploadToImgbb(base64, imgbbOptions)) ?? undefined;
-
-      if (!permanentResult) {
-        console.error('[ImgBB] ✗ ImgBB upload ultimately failed — returning QuickChart URLs only');
-      }
+    if (!permanentUrl && ctx?.env?.IMG_BB_API_KEY) {
+      permanentUrl = await uploadToImgbb(pngBytes, ctx.env.IMG_BB_API_KEY);
     }
   }
 
-  console.log('[ImgBB] ═══════════════════════════════════════════');
+  // Only request a QuickChart short URL when we don't already have a permanent one
+  const shortUrl = permanentUrl ? imageUrl : ((await createQuickChartShortUrl(config, w, h)) ?? imageUrl);
 
   return {
     imageUrl,
     shortUrl,
-    ...(permanentResult
-      ? {
-        permanentUrl: permanentResult.permanentUrl,
-        permanentViewerUrl: permanentResult.viewerUrl,
-      }
-      : {}),
+    ...(permanentUrl ? { permanentUrl } : {}),
   };
 }
 
-// ── Gemini function declaration ────────────────────────────────────────────────
+// ── Gemini tool definition (no internal secrets exposed to LLM) ────────────────
 export const CREATE_CHART_DECLARATION = {
   name: 'create_chart',
   description:
-    'Renders a chart image from data and returns a public image URL. ' +
+    'Renders a chart image from data and returns an image URL. ' +
     'Always call this AFTER fetching data with run_report / run_realtime_report. ' +
-    'Prefer charts when presenting trends, comparisons, or funnels to stakeholders. ' +
-    'If an ImgBB API key is provided the chart will be uploaded for permanent storage.',
-  parameters: {
+    'Prefer charts when presenting trends, comparisons, or funnels to stakeholders.',
+  input_schema: {
     type: 'object',
     properties: {
       type: {
@@ -333,15 +300,6 @@ export const CREATE_CHART_DECLARATION = {
       height: { type: 'number', description: 'Image height px. Default 420.' },
       xAxisLabel: { type: 'string' },
       yAxisLabel: { type: 'string' },
-      imgbb: {
-        type: 'object',
-        description: 'Optional configuration for permanently storing the chart via ImgBB.',
-        properties: {
-          apiKey: { type: 'string', description: 'Your ImgBB API key.' },
-          expiration: { type: 'number', description: 'Seconds before auto-delete (60-15552000).' },
-          name: { type: 'string', description: 'Custom file name for the upload.' },
-        },
-      },
     },
     required: ['type', 'title', 'labels', 'datasets'],
   },

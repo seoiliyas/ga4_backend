@@ -1,8 +1,8 @@
 // ── GA4 OAuth route handler: /api/ga4/* ───────────────────────────────────────
 
 import { Env, AuthUser } from '../types';
-import { json, CORS } from '../utils/http';
-import { decryptToken } from '../utils/crypto';
+import { json, isOriginAllowed } from '../utils/http';
+import { decryptToken, signState, verifyState } from '../utils/crypto';
 import {
   storeOAuthTokens,
   getOAuthAccessToken,
@@ -11,12 +11,52 @@ import {
 } from '../services/ga4/oauth';
 import { ga4RestGet, GA4_ADMIN_API_BASE } from '../services/ga4/api';
 
-// Behind Cloud Run the Worker runtime sees http://; rebuild the public https origin.
-function publicOrigin(request: Request): string {
-  const u = new URL(request.url);
-  const local = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
-  const proto = local ? u.protocol.replace(':', '') : 'https'; // Cloud Run is always https externally
-  return `${proto}://${u.host}`;
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_ACCOUNT_SUMMARY_PAGES = 20;
+
+interface OAuthStatePayload {
+  userId: string;
+  ts: number;
+  nonce: string;
+  origin?: string;
+}
+
+function resolvePublicOrigin(request: Request, env: Env): string {
+  if (env.PUBLIC_BASE_URL) {
+    return env.PUBLIC_BASE_URL.replace(/\/+$/, '');
+  }
+  const xfProto = request.headers.get('X-Forwarded-Proto')?.split(',')[0]?.trim();
+  const xfHost =
+    request.headers.get('X-Forwarded-Host')?.split(',')[0]?.trim() ||
+    request.headers.get('Host')?.trim();
+  if (xfProto && xfHost && /^(https?)$/i.test(xfProto)) {
+    return `${xfProto.toLowerCase()}://${xfHost}`;
+  }
+  return new URL(request.url).origin;
+}
+
+function resolveAllowedPostMessageOrigin(
+  candidateOrigin: string | undefined,
+  allowedOriginsEnv?: string,
+): string | undefined {
+  if (!candidateOrigin) return undefined;
+  if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(candidateOrigin)) {
+    return candidateOrigin;
+  }
+  if (allowedOriginsEnv && isOriginAllowed(candidateOrigin, allowedOriginsEnv)) {
+    return candidateOrigin;
+  }
+  return undefined;
+}
+
+function htmlResponse(html: string, status = 200): Response {
+  return new Response(html, {
+    status,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  });
 }
 
 // ── Unauthenticated: OAuth callback (Google redirects here) ──────────────────
@@ -25,40 +65,54 @@ export async function handleGa4OAuthCallback(
   request: Request,
   env: Env,
   url: URL,
-  parts: string[],
+  _parts: string[],
 ): Promise<Response> {
   try {
     const code = url.searchParams.get('code');
     const stateParam = url.searchParams.get('state');
-    const error = url.searchParams.get('error');
+    const oauthError = url.searchParams.get('error');
     const db = env.gtm_chat_history;
 
-    if (error) {
-      return new Response(ga4OAuthResultPage(false, error), {
-        status: 200,
-        headers: { 'Content-Type': 'text/html', ...CORS },
-      });
+    if (!env.TOKEN_ENCRYPTION_KEY) {
+      return htmlResponse(ga4OAuthResultPage(false, 'Server encryption key is not configured'), 500);
+    }
+
+    const stateData = stateParam
+      ? await verifyState<OAuthStatePayload>(stateParam, env.TOKEN_ENCRYPTION_KEY)
+      : null;
+
+    const safeOrigin = resolveAllowedPostMessageOrigin(stateData?.origin, env.ALLOWED_ORIGINS);
+
+    if (oauthError) {
+      return htmlResponse(
+        ga4OAuthResultPage(false, `Google authorization error: ${oauthError}`, safeOrigin),
+        200,
+      );
     }
 
     if (!code || !stateParam) {
-      return new Response(ga4OAuthResultPage(false, 'Missing code or state parameter'), {
-        status: 400,
-        headers: { 'Content-Type': 'text/html', ...CORS },
-      });
+      return htmlResponse(
+        ga4OAuthResultPage(false, 'Missing authorization code or state parameter', safeOrigin),
+        400,
+      );
     }
 
-    // Decode state to get userId
-    let stateData: { userId: string; ts: number };
-    try {
-      stateData = JSON.parse(atob(stateParam));
-    } catch {
-      return new Response(ga4OAuthResultPage(false, 'Invalid state parameter'), {
-        status: 400,
-        headers: { 'Content-Type': 'text/html', ...CORS },
-      });
+    if (!stateData || !stateData.userId || typeof stateData.ts !== 'number') {
+      return htmlResponse(
+        ga4OAuthResultPage(false, 'Invalid or tampered OAuth state', safeOrigin),
+        400,
+      );
     }
 
-    const origin = publicOrigin(request);
+    const age = Date.now() - stateData.ts;
+    if (age > OAUTH_STATE_TTL_MS || age < -60_000) {
+      return htmlResponse(
+        ga4OAuthResultPage(false, 'OAuth session expired. Please try connecting again.', safeOrigin),
+        400,
+      );
+    }
+
+    const origin = resolvePublicOrigin(request, env);
     const redirectUri = `${origin}/api/ga4/oauth/callback`;
 
     // Exchange authorization code for tokens
@@ -76,18 +130,15 @@ export async function handleGa4OAuthCallback(
 
     if (!tokenRes.ok) {
       const errText = await tokenRes.text();
-      console.error('OAuth token exchange failed:', errText);
-      return new Response(ga4OAuthResultPage(false, 'Token exchange failed'), {
-        status: 200,
-        headers: { 'Content-Type': 'text/html', ...CORS },
-      });
+      console.error('OAuth token exchange failed:', tokenRes.status, errText);
+      return htmlResponse(ga4OAuthResultPage(false, 'Token exchange failed', safeOrigin), 200);
     }
 
     const tokens = (await tokenRes.json()) as {
       access_token: string;
-      refresh_token: string;
+      refresh_token?: string;
       expires_in: number;
-      scope: string;
+      scope?: string;
     };
 
     // Get the Google user's email for display
@@ -100,21 +151,19 @@ export async function handleGa4OAuthCallback(
         const userInfo = (await userInfoRes.json()) as { email?: string };
         googleEmail = userInfo.email || null;
       }
-    } catch { /* best-effort */ }
+    } catch {
+      /* best-effort */
+    }
 
-    // Store encrypted tokens
     await storeOAuthTokens(db, stateData.userId, tokens, googleEmail, env.TOKEN_ENCRYPTION_KEY);
 
-    return new Response(ga4OAuthResultPage(true), {
-      status: 200,
-      headers: { 'Content-Type': 'text/html', ...CORS },
-    });
+    return htmlResponse(ga4OAuthResultPage(true, undefined, safeOrigin), 200);
   } catch (err: any) {
     console.error('OAuth callback error:', err);
-    return new Response(ga4OAuthResultPage(false, err.message || 'Unexpected error'), {
-      status: 200,
-      headers: { 'Content-Type': 'text/html', ...CORS },
-    });
+    return htmlResponse(
+      ga4OAuthResultPage(false, 'An unexpected error occurred while connecting GA4.'),
+      200,
+    );
   }
 }
 
@@ -135,12 +184,32 @@ export async function handleGa4(
     const oauthAction = parts[3];
 
     if (oauthAction === 'authorize' && method === 'GET') {
-      const origin = publicOrigin(request);
+      if (!env.TOKEN_ENCRYPTION_KEY) {
+        return json({ error: 'Server encryption key not configured' }, 500);
+      }
+      const origin = resolvePublicOrigin(request, env);
       const redirectUri = `${origin}/api/ga4/oauth/callback`;
-      const state = btoa(JSON.stringify({ userId: currentUser.id, ts: Date.now() }));
+      const state = await signState(
+        {
+          userId: currentUser.id,
+          ts: Date.now(),
+          nonce: crypto.randomUUID(),
+          origin: request.headers.get('Origin') || '',
+        },
+        env.TOKEN_ENCRYPTION_KEY,
+      );
+      const authUrl = buildGoogleOAuthUrl(env, state, redirectUri);
+
+      if (
+        request.headers.get('Accept')?.includes('application/json') ||
+        url.searchParams.get('format') === 'json'
+      ) {
+        return json({ url: authUrl });
+      }
+
       return new Response(null, {
         status: 302,
-        headers: { Location: buildGoogleOAuthUrl(env, state, redirectUri), ...CORS },
+        headers: { Location: authUrl },
       });
     }
 
@@ -169,30 +238,42 @@ export async function handleGa4(
               method: 'POST',
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             });
-          } catch { /* best-effort */ }
+          } catch {
+            /* best-effort */
+          }
 
           await db.prepare('DELETE FROM ga4_oauth_tokens WHERE user_id = ?').bind(currentUser.id).run();
         }
 
-        // Also clear stored property
+        // Also clear legacy stored property
         await env.GTM_CONTAINER.delete(`ga4_property:${currentUser.id}`);
 
         return json({ success: true });
       } catch (err: any) {
-        return json({ error: err.message || 'Failed to disconnect' }, 500);
+        console.error('GA4 disconnect error:', err);
+        return json({ error: 'Failed to disconnect GA4 account' }, 500);
       }
     }
   }
 
-  // ── /api/ga4/properties — list available GA4 properties ─────────────
-  if (parts.length === 3 && parts[2] === 'properties') {
-    if (method === 'GET') {
-      try {
-        const accessToken = await getOAuthAccessToken(db, currentUser.id, env);
-        const data = await ga4RestGet(accessToken, `${GA4_ADMIN_API_BASE}/accountSummaries`);
+  // ── /api/ga4/properties — list available GA4 properties (paginated) ───
+  if (parts.length === 3 && parts[2] === 'properties' && method === 'GET') {
+    try {
+      const accessToken = await getOAuthAccessToken(db, currentUser.id, env);
+      const properties: {
+        account: string;
+        accountName: string;
+        propertyId: string;
+        propertyName: string;
+      }[] = [];
 
-        // Flatten into a simple list of properties
-        const properties: { account: string; accountName: string; propertyId: string; propertyName: string }[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; page < MAX_ACCOUNT_SUMMARY_PAGES; page++) {
+        const endpoint = pageToken
+          ? `${GA4_ADMIN_API_BASE}/accountSummaries?pageToken=${encodeURIComponent(pageToken)}`
+          : `${GA4_ADMIN_API_BASE}/accountSummaries`;
+        const data = await ga4RestGet(accessToken, endpoint);
+
         for (const acct of data.accountSummaries || []) {
           for (const prop of acct.propertySummaries || []) {
             properties.push({
@@ -203,10 +284,27 @@ export async function handleGa4(
             });
           }
         }
-        return json({ properties });
-      } catch (err: any) {
-        return json({ error: err.message || 'Failed to list properties' }, 500);
+
+        if (!data.nextPageToken) break;
+        pageToken = data.nextPageToken;
       }
+
+      return json({ properties });
+    } catch (err: any) {
+      if (err.message?.includes('GA4_TOKEN_EXPIRED')) {
+        return json(
+          {
+            error: 'Your Google Analytics session has expired. Please reconnect your GA4 account.',
+            code: 'GA4_TOKEN_EXPIRED',
+          },
+          401,
+        );
+      }
+      if (err.message?.includes('GA4 not connected')) {
+        return json({ error: err.message }, 400);
+      }
+      console.error('Failed to list GA4 properties:', err);
+      return json({ error: 'Failed to list properties' }, 500);
     }
   }
 

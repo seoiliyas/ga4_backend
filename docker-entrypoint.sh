@@ -1,8 +1,39 @@
-#!/bin/sh
-set -e
-mkdir -p "$PERSIST_DIR"
+#!/usr/bin/env sh
+set -eu
 
-# Create tables (schema uses IF NOT EXISTS, safe on every start)
-npx wrangler d1 execute gtm-chat-history --local --persist-to "$PERSIST_DIR" --file=./schema.sql
+# Materialize inline/Base64 service account JSON into GOOGLE_APPLICATION_CREDENTIALS
+# when running outside Cloud Run ADC or without a mounted credentials file.
+if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  if [ -n "${GCP_SERVICE_ACCOUNT_JSON_B64:-}" ] || [ -n "${GCP_SERVICE_ACCOUNT_JSON:-}" ] || [ -n "${GEMINI_SERVICE_ACCOUNT_JSON:-}" ]; then
+    SA_FILE="/tmp/gcp-sa.json"
+    (
+      umask 077
+      node --input-type=module -e '
+        import fs from "node:fs";
+        const raw = (
+          process.env.GCP_SERVICE_ACCOUNT_JSON_B64 ||
+          process.env.GCP_SERVICE_ACCOUNT_JSON ||
+          process.env.GEMINI_SERVICE_ACCOUNT_JSON ||
+          ""
+        ).trim();
+        let out = raw;
+        if (!raw.startsWith("{")) {
+          const norm = raw.replace(/-/g, "+").replace(/_/g, "/");
+          out = Buffer.from(norm, "base64").toString("utf8");
+        }
+        const parsed = JSON.parse(out);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("Service account payload must be a JSON object");
+        }
+        fs.writeFileSync("/tmp/gcp-sa.json", out, { mode: 0o600 });
+      '
+    )
+    export GOOGLE_APPLICATION_CREDENTIALS="$SA_FILE"
+  fi
+fi
 
-exec npx wrangler dev --local --ip 0.0.0.0 --port "$PORT" --persist-to "$PERSIST_DIR"
+if [ "${1:-}" = "--init-only" ]; then
+  exec node --import tsx src/bootstrap.ts
+fi
+
+exec "$@"
